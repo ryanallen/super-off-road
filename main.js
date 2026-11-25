@@ -4,9 +4,7 @@ ctx.imageSmoothingEnabled = false;
 
 const names = ["Fandango","Sidewinder","Wipeout","Big Dukes","Blaster","Cliffhanger","Huevos Grande","Hurricane Gulch"];
 const files = ["fandango","sidewinder","wipeout","big-dukes","blaster","cliffhanger","huevos-grande","hurricane-gulch"];
-const colors = ["#ec8be8","#efef28","#a38de2","#c5c5c5"];
 const assetRoot = "./assets";
-const countries = ["ITALY","FRANCE","JAPAN","CANADA","USA","BRITAIN","AUSTRALIA","GERMANY"];
 const upgrades = [
   {label:"NITRO",price:10000,key:"nitro"},
   {label:"ACCELERATION",price:80000,key:"accel"},
@@ -26,6 +24,16 @@ const routes = [
   [[285,325],[180,315],[75,300],[55,245],[60,135],[90,55],[185,40],[300,55],[410,50],[520,40],[535,95],[495,155],[445,200],[475,245],[490,300],[430,320]]
 ];
 const starts = [[340,280],[140,280],[310,280],[330,285],[115,195],[340,310],[310,300],[305,290]];
+const rampZones = [
+  [[148,275,58,42],[397,215,55,45]],
+  [[300,118,48,40],[320,300,57,42],[230,285,47,38]],
+  [[170,222,72,45],[315,58,40,24]],
+  [[230,190,100,64],[190,25,35,22],[310,26,35,22],[425,24,35,22]],
+  [[245,180,70,175],[395,215,55,42]],
+  [[235,220,40,37],[145,295,50,34],[400,180,48,100]],
+  [[323,119,50,45],[220,312,50,30]],
+  [[280,105,62,45],[410,205,55,35]]
+];
 const trackImages = files.map(file => {
   const image = new Image();
   image.src = `${assetRoot}/${file}.png`;
@@ -49,6 +57,9 @@ for(const key of ["player-count","name-entry","country-select","results-podium"]
 const truckImages=["pink","yellow","purple","grey"].map(name=>{
   const image=new Image();image.src=`${assetRoot}/truck-${name}.png`;return image;
 });
+const pickupImages=Array.from({length:9},(_,i)=>{
+  const image=new Image();image.src=`${assetRoot}/pickup-${i+1}.png`;return image;
+});
 const recordings=new Map();
 let playing=null;
 function music(name,loop=false,onEnd=null){
@@ -58,6 +69,48 @@ function music(name,loop=false,onEnd=null){
   if(!audio){audio=new Audio(`${assetRoot}/music/${name}.ogg`);recordings.set(name,audio);}
   audio.loop=loop;audio.volume=.45;audio.onended=onEnd;audio.currentTime=0;
   playing=audio;audio.play().catch(()=>{});
+}
+let soundContext=null,engineTone=null,engineGain=null;
+function enableSound(){
+  const AudioContextClass=window.AudioContext||window.webkitAudioContext;
+  if(!AudioContextClass)return;
+  if(!soundContext){
+    soundContext=new AudioContextClass();
+    engineTone=soundContext.createOscillator();engineTone.type="square";
+    engineGain=soundContext.createGain();engineGain.gain.value=0;
+    engineTone.connect(engineGain).connect(soundContext.destination);engineTone.start();
+  }
+  if(soundContext.state==="suspended")soundContext.resume().catch(()=>{});
+}
+function soundEffect(kind){
+  if(!soundContext||soundContext.state!=="running")return;
+  const now=soundContext.currentTime;
+  const tone=(start,end,length,volume,delay=0)=>{
+    const oscillator=soundContext.createOscillator(),gain=soundContext.createGain();
+    oscillator.type="square";oscillator.frequency.setValueAtTime(start,now+delay);
+    oscillator.frequency.exponentialRampToValueAtTime(end,now+delay+length);
+    gain.gain.setValueAtTime(volume,now+delay);
+    gain.gain.exponentialRampToValueAtTime(.0001,now+delay+length);
+    oscillator.connect(gain).connect(soundContext.destination);
+    oscillator.start(now+delay);oscillator.stop(now+delay+length);
+  };
+  if(kind==="nitro"){
+    tone(520,105,.24,.045);tone(92,63,.09,.035);
+  }else if(kind==="collision"){
+    tone(125,46,.11,.038);tone(215,72,.06,.02);
+  }else if(kind==="pickup"){
+    tone(520,610,.075,.026);tone(780,920,.11,.024,.07);
+  }
+}
+function updateEngineSound(){
+  if(!soundContext)return;
+  const running=state==="race"&&!paused;
+  const speed=running?Math.max(0,...trucks.slice(0,players).map(t=>Math.hypot(t.vx,t.vy))):0;
+  const pads=connectedGamepads();
+  const throttle=running&&Array.from({length:players},(_,i)=>(i===0&&held.has("KeyX"))||(i===1&&held.has("KeyJ"))||buttonDown(pads[i],0)).some(Boolean);
+  const now=soundContext.currentTime;
+  engineTone.frequency.setTargetAtTime(62+speed*.65+(throttle?15:0),now,.045);
+  engineGain.gain.setTargetAtTime(running?(throttle?.015:.006):0,now,.04);
 }
 const anthemFiles=["italy","france","japan","canada","usa","britain","australia","germany"];
 const trackPixels = trackImages.map((image, i) => {
@@ -121,20 +174,22 @@ function point(i) {
 }
 function startRace() {
   const info=trackForRace(race);track=info.track;reverse=info.reverse;
-  const s=starts[track];elapsed=0;pickups=[];pickupCount=0;pickupTimer=2;placement=[];paused=false;finishDelay=0;
+  const s=starts[track];elapsed=0;pickups=[];pickupCount=0;pickupTimer=1.6;placement=[];paused=false;finishDelay=0;
   trucks=Array.from({length:4},(_,i)=>({
     x:s[0]+(i%2)*18-9,y:s[1]+Math.floor(i/2)*17-9,
     vx:0,vy:0,angle:reverse ? 0 : Math.PI,lap:1,waypoint:1,finished:false,
-    boost:0,rank:0,i
+    boost:0,boostPower:0,air:0,airTotal:0,hop:0,rampCooldown:0,wallCooldown:0,rank:0,i
   }));
   state="intro";introTime=4;
   music("race-start");
 }
 function spawnPickup() {
-  const route=routes[track], p=route[(4+pickupCount*3)%route.length];
-  pickups.push({x:p[0],y:p[1],kind:pickupCount%2?"nitro":"cash",value:Math.min(5,Math.floor(pickupCount/2)+1),ttl:12});
+  const fandangoSites=[[273,27],[423,121],[36,323],[273,27],[423,121],[36,323],[48,99],[573,27],[524,295]];
+  const p=track===0?fandangoSites[pickupCount%fandangoSites.length]:point((4+pickupCount*3)%routes[track].length);
+  const kind=pickupCount%2?"nitro":"cash";
+  const value=Math.min(kind==="nitro"?5:4,Math.floor(pickupCount/2)+1);
+  pickups=[{x:p[0],y:p[1],kind,value,number:pickupCount%9+1,ttl:2.25}];
   pickupCount++;
-  if(pickups.length>3)pickups.shift();
 }
 function road(x,y) {
   if(x<7||x>592||y<3||y>337)return false;
@@ -150,6 +205,21 @@ function road(x,y) {
   const s=starts[track];
   return barriers<7 || Math.abs(x-s[0])<120&&Math.abs(y-s[1])<45;
 }
+function terrain(x,y){
+  if(!road(x,y))return "curb";
+  const data=trackPixels[track];if(!data)return "dirt";
+  let r=0,g=0,b=0;
+  for(const dy of [-5,0,5])for(const dx of [-5,0,5]){
+    const px=Math.max(0,Math.min(599,Math.round(x+dx)));
+    const py=Math.max(0,Math.min(359,Math.round(y+dy)));
+    const j=(py*600+px)*4;r+=data[j];g+=data[j+1];b+=data[j+2];
+  }
+  r/=9;g/=9;b/=9;
+  if(b>55&&b>r*.75&&b>g*1.25)return "water";
+  if(r>100&&g>45&&b>8&&rampZones[track].some(([cx,cy,rx,ry])=>((x-cx)/rx)**2+((y-cy)/ry)**2<1))return "ramp";
+  if(r<85&&g<40)return "mud";
+  return "dirt";
+}
 function controls(i) {
   const pad=connectedGamepads()[i];
   const direction=padDirection(pad);
@@ -163,50 +233,58 @@ function controls(i) {
   padNitroHeld[i]=padPressed;
   return {turn:Number(right)-Number(left),gas,nitro};
 }
+function cpuControls(t){
+  const p=point(t.waypoint),desired=Math.atan2(p[1]-t.y,p[0]-t.x);
+  const delta=Math.atan2(Math.sin(desired-t.angle),Math.cos(desired-t.angle));
+  return {turn:delta>.14?1:delta<-.14?-1:0,gas:Math.abs(delta)<.78&&Math.hypot(p[0]-t.x,p[1]-t.y)>12,nitro:false};
+}
 function updateTruck(t,dt) {
   const stat=racerStats[t.i];
-  if(t.i>=players||!stat.active){
-    const route=routes[track];
-    let length=0;
-    const segments=[];
-    for(let j=0;j<route.length;j++){
-      const a=point(j),b=point(j+1),d=Math.hypot(b[0]-a[0],b[1]-a[1]);
-      segments.push(d);length+=d;
-    }
-    t.aiProgress=(t.aiProgress||0)+(122+Math.min(60,race*.8)+t.i*2)*dt;
-    let along=(t.aiProgress+t.i*18)%length, j=0;
-    while(along>segments[j]&&j<segments.length-1)along-=segments[j++];
-    const a=point(j),b=point(j+1),f=along/segments[j];
-    t.x=a[0]+(b[0]-a[0])*f;t.y=a[1]+(b[1]-a[1])*f;
-    t.angle=Math.atan2(b[1]-a[1],b[0]-a[0]);
-    t.waypoint=(j+1)%route.length;
-    t.lap=Math.min(5,1+Math.floor(t.aiProgress/length));
-    if(t.lap>4&&!t.finished){t.finished=true;t.rank=placement.length+1;placement.push(t.i);}
-    return;
-  }
-  let steer=0,gas=false,nitro=false;
-  ({turn:steer,gas,nitro}=controls(t.i));
+  const ai=t.i>=players||!stat.active;
+  const {turn:steer,gas,nitro}=ai?cpuControls(t):controls(t.i);
   const speed=Math.hypot(t.vx,t.vy);
-  const turnSpeed=(2.9+stat.tires*.13)*(speed<18?.7:1);
+  const surface=terrain(t.x,t.y);
+  const turnSpeed=(2.85+stat.shocks*.1)*(speed<18?.7:1)*(t.air>0?.8:1);
   t.angle+=steer*turnSpeed*dt;
-  if(nitro&&stat.nitro>0&&gas){stat.nitro--;t.boost=.7;}
+  if(nitro&&stat.nitro>0&&gas){
+    stat.nitro--;t.boostPower=Math.min(3,(t.boost>0?t.boostPower:0)+1);
+    t.boost=.8;t.vx+=Math.cos(t.angle)*95;t.vy+=Math.sin(t.angle)*95;
+    soundEffect("nitro");
+  }
   t.boost=Math.max(0,t.boost-dt);
-  const acceleration=170+stat.accel*18;
-  const limit=165+stat.speed*13+(t.boost>0?140:0);
+  if(t.boost===0)t.boostPower=0;
+  t.air=Math.max(0,t.air-dt);
+  t.rampCooldown=Math.max(0,t.rampCooldown-dt);
+  t.wallCooldown=Math.max(0,t.wallCooldown-dt);
+  const acceleration=(ai?190:170+stat.accel*18+t.boostPower*90)*(surface==="mud"?.78:surface==="water"?.55:1);
+  const baseLimit=ai?110+Math.min(70,race*1.1)+t.i*3:165+stat.speed*13;
+  const limit=baseLimit*(t.boost>0?1+t.boostPower*.65:1);
   if(gas){
     t.vx+=Math.cos(t.angle)*acceleration*dt;
     t.vy+=Math.sin(t.angle)*acceleration*dt;
   }
-  const drag=Math.exp(-(gas?.7:2.5)*dt);
+  const sideways=-Math.sin(t.angle)*t.vx+Math.cos(t.angle)*t.vy;
+  const grip=(2.2+stat.tires*.7)*(t.air>0?.35:surface==="water"?.4:surface==="mud"?.65:1);
+  const skid=sideways*(1-Math.exp(-grip*dt));
+  t.vx+=Math.sin(t.angle)*skid;t.vy-=Math.cos(t.angle)*skid;
+  const drag=Math.exp(-((gas?.7:2.5)+(surface==="curb"?3.5:surface==="mud"?2:surface==="water"?4:0))*dt);
   t.vx*=drag;t.vy*=drag;
   const v=Math.hypot(t.vx,t.vy);
   if(v>limit){t.vx*=limit/v;t.vy*=limit/v;}
+  const wasOnRoad=road(t.x,t.y);
   t.x+=t.vx*dt;t.y+=t.vy*dt;
-  if(t.x<7||t.x>592){t.x=Math.max(7,Math.min(592,t.x));t.vx*=-.25;}
-  if(t.y<3||t.y>337){t.y=Math.max(3,Math.min(337,t.y));t.vy*=-.25;}
-  if(!road(t.x,t.y)){const curbDrag=Math.exp(-4*dt);t.vx*=curbDrag;t.vy*=curbDrag;}
+  let hit=false;
+  if(t.x<7||t.x>592){t.x=Math.max(7,Math.min(592,t.x));t.vx*=-.3;hit=true;}
+  if(t.y<3||t.y>337){t.y=Math.max(3,Math.min(337,t.y));t.vy*=-.3;hit=true;}
+  if(wasOnRoad&&!road(t.x,t.y)&&speed>45){t.vx*=.65;t.vy*=.65;hit=true;}
+  if(hit&&t.wallCooldown<=0){soundEffect("collision");t.wallCooldown=.25;}
+  const nextSurface=terrain(t.x,t.y);
+  if(nextSurface==="ramp"&&surface!=="ramp"&&t.rampCooldown<=0&&speed>55){
+    t.airTotal=.28*(1-stat.shocks*.09);t.air=t.airTotal;
+    t.hop=7*(1-stat.shocks*.1);t.rampCooldown=.8;
+  }
   const p=point(t.waypoint);
-  if(Math.hypot(t.x-p[0],t.y-p[1])<25) {
+  if(Math.hypot(t.x-p[0],t.y-p[1])<(ai?28:25)) {
     t.waypoint=(t.waypoint+1)%routes[track].length;
     if(t.waypoint===1){
       t.lap++;
@@ -221,6 +299,7 @@ function updateTruck(t,dt) {
       stat.cash+=bonus;stat.points+=bonus/1000;
     }
     pickups.splice(pickups.indexOf(found),1);
+    soundEffect("pickup");
   }
 }
 function update(dt){
@@ -237,21 +316,29 @@ function update(dt){
   if(state!=="race"||paused)return;
   elapsed+=dt;
   pickupTimer-=dt;
-  if(pickupTimer<=0){spawnPickup();pickupTimer=3.5;}
+  if(pickupTimer<=0){spawnPickup();pickupTimer+=2.2;}
   pickups=pickups.filter(p=>{p.ttl-=dt;return p.ttl>0;});
   for(const t of trucks)if(!t.finished)updateTruck(t,dt);
   for(let a=0;a<4;a++)for(let b=a+1;b<4;b++){
     const A=trucks[a],B=trucks[b],dx=B.x-A.x,dy=B.y-A.y,d=Math.hypot(dx,dy);
-    if(d>0&&d<15){
+    if(!A.finished&&!B.finished&&d>0&&d<15){
       const n=(15-d)/2,ax=A.x-dx/d*n,ay=A.y-dy/d*n,bx=B.x+dx/d*n,by=B.y+dy/d*n;
       if(A.i>=players||road(ax,ay)){A.x=ax;A.y=ay;}
       if(B.i>=players||road(bx,by)){B.x=bx;B.y=by;}
-      A.vx*=.7;A.vy*=.7;B.vx*=.7;B.vy*=.7;
+      const nx=dx/d,ny=dy/d,relative=(B.vx-A.vx)*nx+(B.vy-A.vy)*ny;
+      if(relative<0){
+        const impulse=-(1.25)*relative/2;
+        A.vx-=impulse*nx;A.vy-=impulse*ny;
+        B.vx+=impulse*nx;B.vy+=impulse*ny;
+        if(relative< -35&&Math.min(A.wallCooldown,B.wallCooldown)<=0){
+          soundEffect("collision");A.wallCooldown=.25;B.wallCooldown=.25;
+        }
+      }
     }
   }
-  if(trucks.every(t=>t.finished)){
+  if(trucks.slice(0,players).every(t=>!racerStats[t.i].active||t.finished)){
     finishDelay+=dt;
-    if(finishDelay>=1.5)finishRace();
+    if(finishDelay>=2)finishRace();
   }
 }
 function finishRace(){
@@ -352,6 +439,7 @@ function handleMenu(key){
   if(state==="highscores"&&key==="Enter"){location.reload();}
 }
 window.addEventListener("keydown",e=>{
+  enableSound();
   if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code))e.preventDefault();
   if(!held.has(e.code))just.add(e.code);
   held.add(e.code);
@@ -367,6 +455,7 @@ function pollGamepads(){
       b:buttonDown(pad,1),
       start:buttonDown(pad,9)||buttonDown(pad,8)
     };
+    if(pressed.a||pressed.b||pressed.start)enableSound();
     const previous=padMenuPrevious.get(pad.index)??{};
     const repeats=padMenuRepeat.get(pad.index)??{};
     const now=performance.now();
@@ -397,7 +486,8 @@ function box(x,y,w,h,fill="#170000",stroke="#a6541a"){
   ctx.fillStyle=fill;ctx.fillRect(x,y,w,h);ctx.strokeStyle=stroke;ctx.lineWidth=3;ctx.strokeRect(x+1.5,y+1.5,w-3,h-3);
 }
 function drawTruck(t){
-  ctx.save();ctx.translate(t.x,t.y+88);
+  const lift=t.air>0&&t.airTotal>0?Math.sin(Math.PI*(1-t.air/t.airTotal))*t.hop:0;
+  ctx.save();ctx.translate(t.x,t.y+88-lift);
   let displayAngle=Math.atan2(Math.sin(t.angle),Math.cos(t.angle));
   let mirrored=false;
   if(displayAngle>Math.PI/2){displayAngle-=Math.PI;mirrored=true;}
@@ -430,9 +520,8 @@ function drawRace(){
   ctx.font="bold 29px monospace";ctx.textAlign="center";ctx.lineWidth=2;ctx.strokeStyle="#ae5d16";
   ctx.strokeText(clock,499,63);ctx.fillStyle="#fff6ed";ctx.fillText(clock,499,63);
   for(const pickup of pickups){
-    ctx.fillStyle="#dc77e2";ctx.fillRect(pickup.x-8,pickup.y+80,16,16);
-    ctx.strokeStyle="#51225b";ctx.lineWidth=2;ctx.strokeRect(pickup.x-7,pickup.y+81,14,14);
-    text(String(pickup.value),pickup.x,pickup.y+93,12,"#42113f","center");
+    const sprite=pickupImages[pickup.number-1];
+    if(sprite.complete&&sprite.naturalWidth)ctx.drawImage(sprite,pickup.x-8,pickup.y+81);
   }
   trucks.forEach(drawTruck);
   if(paused){box(170,177,260,70);text("PAUSED",300,222,32,"#f4ea73","center");}
@@ -533,6 +622,7 @@ function frame(now){
   pollGamepads();
   const dt=Math.min(.05,(now-last)/1000);last=now;accumulator+=dt;
   while(accumulator>=1/60){update(1/60);accumulator-=1/60;}
+  updateEngineSound();
   if(state==="race")drawRace();else drawMenu();
   just.clear();requestAnimationFrame(frame);
 }
