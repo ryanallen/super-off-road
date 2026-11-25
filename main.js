@@ -68,17 +68,32 @@ const trackPixels = trackImages.map((image, i) => {
 
 let state = "title", players = 1, race = 1, track = 0, reverse = false, paused = false;
 let menuIndex = 0, shopPlayer = 0, shopIndex = 0, elapsed = 0, finishDelay = 0, introTime = 0, endTime = 0;
-let trucks = [], pickup = null, pickupCount = 0, placement = [];
+let trucks = [], pickups = [], pickupCount = 0, pickupTimer = 0, placement = [];
 const held = new Set(), just = new Set();
 const padNitroHeld=[false,false,false,false];
 const racerNames = ["PLAYER 1","PLAYER 2","PLAYER 3","PLAYER 4"];
 const racerCountries = [4,4,4,4];
 const racerStats = Array.from({length:4},()=>({cash:0,points:0,lives:3,nitro:25,tires:0,shocks:0,accel:0,speed:0,active:true}));
 let nameBuffer = "", namePlayer = 0, nameLetter = 0;
-const nameLetters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ ";
+const nameLetters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const padMenuPrevious = new Map();
+const padMenuRepeat = new Map();
 function connectedGamepads(){
   return Array.from(navigator.getGamepads?.()||[]).filter(pad=>pad&&pad.connected!==false);
+}
+function buttonDown(pad,index){
+  const button=pad?.buttons?.[index];
+  return typeof button==="number"?button>.5:!!(button?.pressed||button?.value>.5);
+}
+function padDirection(pad){
+  const hat=pad?.mapping!=="standard"&&pad?.axes?.length>6;
+  const horizontal=hat?pad.axes[6]:0,vertical=hat?pad.axes[7]:0;
+  const dLeft=buttonDown(pad,14)||horizontal<-.5;
+  const dRight=buttonDown(pad,15)||horizontal>.5;
+  const dUp=buttonDown(pad,12)||vertical<-.5;
+  const dDown=buttonDown(pad,13)||vertical>.5;
+  if(dLeft||dRight||dUp||dDown)return {left:dLeft,right:dRight,up:dUp,down:dDown};
+  return {left:(pad?.axes?.[0]||0)<-.5,right:(pad?.axes?.[0]||0)>.5,up:(pad?.axes?.[1]||0)<-.5,down:(pad?.axes?.[1]||0)>.5};
 }
 
 function trackForRace(n) {
@@ -97,7 +112,7 @@ function point(i) {
 }
 function startRace() {
   const info=trackForRace(race);track=info.track;reverse=info.reverse;
-  const s=starts[track];elapsed=0;pickup=null;pickupCount=0;placement=[];paused=false;finishDelay=0;
+  const s=starts[track];elapsed=0;pickups=[];pickupCount=0;pickupTimer=2;placement=[];paused=false;finishDelay=0;
   trucks=Array.from({length:4},(_,i)=>({
     x:s[0]+(i%2)*18-9,y:s[1]+Math.floor(i/2)*17-9,
     vx:0,vy:0,angle:reverse ? 0 : Math.PI,lap:1,waypoint:1,finished:false,
@@ -108,7 +123,9 @@ function startRace() {
 }
 function spawnPickup() {
   const route=routes[track], p=route[(4+pickupCount*3)%route.length];
-  pickup={x:p[0]+(pickupCount%2?12:-12),y:p[1]+(pickupCount%3?8:-8),kind:pickupCount%2?"nitro":"cash"};
+  pickups.push({x:p[0],y:p[1],kind:pickupCount%2?"nitro":"cash",value:Math.min(5,Math.floor(pickupCount/2)+1),ttl:12});
+  pickupCount++;
+  if(pickups.length>3)pickups.shift();
 }
 function road(x,y) {
   if(x<7||x>592||y<3||y>357)return false;
@@ -126,13 +143,13 @@ function road(x,y) {
 }
 function controls(i) {
   const pad=connectedGamepads()[i];
-  const axis=pad?.axes?.[0]||0;
-  const left=(i===0&&held.has("ArrowLeft"))||(i===1&&held.has("KeyA"))||axis<-.35||!!pad?.buttons?.[14]?.pressed;
-  const right=(i===0&&held.has("ArrowRight"))||(i===1&&held.has("KeyD"))||axis>.35||!!pad?.buttons?.[15]?.pressed;
-  const gas=(i===0&&held.has("KeyX"))||(i===1&&held.has("KeyJ"))||!!pad?.buttons?.[0]?.pressed;
+  const direction=padDirection(pad);
+  const left=(i===0&&held.has("ArrowLeft"))||(i===1&&held.has("KeyA"))||direction.left;
+  const right=(i===0&&held.has("ArrowRight"))||(i===1&&held.has("KeyD"))||direction.right;
+  const gas=(i===0&&held.has("KeyX"))||(i===1&&held.has("KeyJ"))||buttonDown(pad,0);
   const nitroKey=i===0?"KeyZ":i===1?"KeyK":null;
   const keyNitro=nitroKey?just.delete(nitroKey):false;
-  const padPressed=!!pad?.buttons?.[1]?.pressed;
+  const padPressed=buttonDown(pad,1);
   const nitro=keyNitro||padPressed&&!padNitroHeld[i];
   padNitroHeld[i]=padPressed;
   return {turn:Number(right)-Number(left),gas,nitro};
@@ -188,14 +205,14 @@ function updateTruck(t,dt) {
       if(t.lap>4&&!t.finished){t.finished=true;t.rank=placement.length+1;placement.push(t.i);finishDelay=1.5;}
     }
   }
-  if(pickup&&Math.hypot(t.x-pickup.x,t.y-pickup.y)<14){
-    const value=Math.min(5,Math.floor(pickupCount/2)+1);
-    if(pickup.kind==="nitro")stat.nitro=Math.min(99,stat.nitro+value);
+  const found=pickups.find(p=>Math.hypot(t.x-p.x,t.y-p.y)<14);
+  if(found){
+    if(found.kind==="nitro")stat.nitro=Math.min(99,stat.nitro+found.value);
     else {
-      const bonus=Math.min(40000,value*10000);
+      const bonus=Math.min(40000,found.value*10000);
       stat.cash+=bonus;stat.points+=bonus/1000;
     }
-    pickupCount++;pickup=null;
+    pickups.splice(pickups.indexOf(found),1);
   }
 }
 function update(dt){
@@ -211,7 +228,9 @@ function update(dt){
   }
   if(state!=="race"||paused)return;
   elapsed+=dt;
-  if(!pickup && Math.random()<dt*.15)spawnPickup();
+  pickupTimer-=dt;
+  if(pickupTimer<=0){spawnPickup();pickupTimer=3.5;}
+  pickups=pickups.filter(p=>{p.ttl-=dt;return p.ttl>0;});
   for(const t of trucks)if(!t.finished)updateTruck(t,dt);
   for(let a=0;a<4;a++)for(let b=a+1;b<4;b++){
     const A=trucks[a],B=trucks[b],dx=B.x-A.x,dy=B.y-A.y,d=Math.hypot(dx,dy);
@@ -279,10 +298,12 @@ function handleMenu(key){
   }
   if(state==="name"){
     if(key==="Backspace")nameBuffer=nameBuffer.slice(0,-1);
-    else if(key==="ArrowLeft")nameLetter=(nameLetter+nameLetters.length-1)%nameLetters.length;
-    else if(key==="ArrowRight")nameLetter=(nameLetter+1)%nameLetters.length;
-    else if(key==="ArrowUp")nameLetter=(nameLetter+nameLetters.length-4)%nameLetters.length;
-    else if(key==="ArrowDown")nameLetter=(nameLetter+4)%nameLetters.length;
+    else if(key==="ArrowLeft")nameLetter=(nameLetter+27)%28;
+    else if(key==="ArrowRight")nameLetter=(nameLetter+1)%28;
+    else if(key==="ArrowUp")nameLetter=(nameLetter+24)%28;
+    else if(key==="ArrowDown")nameLetter=(nameLetter+4)%28;
+    else if(key==="GamepadA"&&nameLetter===26)nameBuffer=nameBuffer.slice(0,-1);
+    else if(key==="GamepadA"&&nameLetter===27)handleMenu("GamepadStart");
     else if(key==="GamepadA"&&nameBuffer.length<10)nameBuffer+=nameLetters[nameLetter];
     else if(key==="Enter"||key==="GamepadStart"){
       racerNames[namePlayer]=nameBuffer.trim().toUpperCase()||`PLAYER ${namePlayer+1}`;
@@ -326,27 +347,32 @@ window.addEventListener("keydown",e=>{
 window.addEventListener("keyup",e=>held.delete(e.code));
 function pollGamepads(){
   for(const pad of connectedGamepads()){
+    const direction=padDirection(pad);
     const pressed={
-      left:(pad.axes?.[0]||0)<-.5||!!pad.buttons?.[14]?.pressed,
-      right:(pad.axes?.[0]||0)>.5||!!pad.buttons?.[15]?.pressed,
-      up:(pad.axes?.[1]||0)<-.5||!!pad.buttons?.[12]?.pressed,
-      down:(pad.axes?.[1]||0)>.5||!!pad.buttons?.[13]?.pressed,
-      a:!!pad.buttons?.[0]?.pressed,
-      b:!!pad.buttons?.[1]?.pressed,
-      start:!!pad.buttons?.[9]?.pressed
+      ...direction,
+      a:buttonDown(pad,0),
+      b:buttonDown(pad,1),
+      start:buttonDown(pad,9)||buttonDown(pad,8)
     };
     const previous=padMenuPrevious.get(pad.index)??{};
+    const repeats=padMenuRepeat.get(pad.index)??{};
+    const now=performance.now();
     if(state==="race"){
       if(pressed.start&&!previous.start)handleMenu("Enter");
     }else if(state!=="intro"){
       for(const [button,key] of [["left","ArrowLeft"],["right","ArrowRight"],["up","ArrowUp"],["down","ArrowDown"]]){
-        if(pressed[button]&&!previous[button])handleMenu(key);
+        if(pressed[button]&&(!previous[button]||now>=(repeats[button]??Infinity))){
+          handleMenu(key);
+          repeats[button]=now+(previous[button]?130:350);
+        }
+        if(!pressed[button])delete repeats[button];
       }
       if(pressed.b&&!previous.b&&state==="name")handleMenu("Backspace");
       if(pressed.a&&!previous.a)handleMenu(state==="name"?"GamepadA":"Enter");
       if(pressed.start&&!previous.start)handleMenu(state==="name"?"GamepadStart":"Enter");
     }
     padMenuPrevious.set(pad.index,pressed);
+    padMenuRepeat.set(pad.index,repeats);
   }
 }
 
@@ -358,7 +384,16 @@ function box(x,y,w,h,fill="#170000",stroke="#a6541a"){
   ctx.fillStyle=fill;ctx.fillRect(x,y,w,h);ctx.strokeStyle=stroke;ctx.lineWidth=3;ctx.strokeRect(x+1.5,y+1.5,w-3,h-3);
 }
 function drawTruck(t){
-  ctx.save();ctx.translate(t.x,t.y+88);ctx.rotate(t.angle);
+  ctx.save();ctx.translate(t.x,t.y+88);
+  let displayAngle=Math.atan2(Math.sin(t.angle),Math.cos(t.angle));
+  let mirrored=false;
+  if(displayAngle>Math.PI/2){displayAngle-=Math.PI;mirrored=true;}
+  if(displayAngle< -Math.PI/2){displayAngle+=Math.PI;mirrored=true;}
+  ctx.rotate(displayAngle);ctx.scale(mirrored?-1:1,1);
+  if(t.boost>0){
+    ctx.fillStyle="#fff8e8";
+    ctx.fillRect(-26,-5,5,3);ctx.fillRect(-31,3,4,3);ctx.fillRect(-35,-1,3,2);
+  }
   const im=truckImages[t.i];
   if(im.complete&&im.naturalWidth)ctx.drawImage(im,-20,-11,40,22);
   ctx.restore();
@@ -375,9 +410,10 @@ function drawRace(){
   });
   box(432,27,126,53,"#250100","#eee5ab");
   text(elapsed.toFixed(1).padStart(5,"0"),495,64,30,"#f9f2c4","center");
-  if(pickup){
-    box(pickup.x-8,pickup.y+80,16,16,pickup.kind==="cash"?"#f3e863":"#92dcfa","#4d0a03");
-    text(pickup.kind==="cash"?"$":"N",pickup.x,pickup.y+93,12,"#421100","center");
+  for(const pickup of pickups){
+    ctx.fillStyle="#dc77e2";ctx.fillRect(pickup.x-8,pickup.y+80,16,16);
+    ctx.strokeStyle="#51225b";ctx.lineWidth=2;ctx.strokeRect(pickup.x-7,pickup.y+81,14,14);
+    text(String(pickup.value),pickup.x,pickup.y+93,12,"#42113f","center");
   }
   trucks.forEach(drawTruck);
   if(paused){box(170,177,260,70);text("PAUSED",300,222,32,"#f4ea73","center");}
@@ -407,10 +443,14 @@ function drawMenu(){
     menuImage("name-entry");
     ctx.fillStyle="#000";ctx.fillRect(43,419,154,29);
     text(nameBuffer.toUpperCase()+"_",115,440,20,"#f18a77","center");
-    text(`P${namePlayer+1}  ${nameLetters[nameLetter]===" "?"SPACE":nameLetters[nameLetter]}`,293,440,14,"#f18a77","center");
+    text(`P${namePlayer+1}  ${nameLetter===26?"DELETE":nameLetter===27?"FINISH":nameLetters[nameLetter]}`,293,440,14,"#f18a77","center");
     if(nameLetter<26){
       ctx.strokeStyle="#f4e833";ctx.lineWidth=2;
-      ctx.strokeRect(74+(nameLetter%4)*16,198+Math.floor(nameLetter/4)*19,17,19);
+      ctx.strokeRect(74+(nameLetter%4)*19,207+Math.floor(nameLetter/4)*19,18,18);
+    }else{
+      ctx.strokeStyle="#f4e833";ctx.lineWidth=2;
+      if(nameLetter===26)ctx.strokeRect(111,337,25,21);
+      else ctx.strokeRect(53,373,115,23);
     }
   } else if(state==="country"){
     menuImage("country-select");
@@ -480,7 +520,11 @@ function frame(now){
 requestAnimationFrame(frame);
 window.__superOffRoad = {
   get state(){return state},
+  get players(){return players},
+  get nameLetter(){return nameLetter},
+  get paused(){return paused},
   get trucks(){return trucks.map(t=>({x:t.x,y:t.y,angle:t.angle,lap:t.lap,waypoint:t.waypoint}))},
+  get pickups(){return pickups.map(p=>({...p}))},
   get route(){return routes[track].map((_,i)=>point(i))},
   get track(){return track},
   get reverse(){return reverse},
