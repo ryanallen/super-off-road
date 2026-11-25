@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ivan “Ironman” Stewart’s Super Off-Road — NES remake</title>
+  <style>
+    html,body{margin:0;width:100%;height:100%;background:#050000;color:#f8eb91;font:16px monospace}
+    body{display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden}
+    main{width:min(100vw,calc((100vh - 2rem)*1.3392857))}
+    canvas{display:block;width:100%;height:auto;image-rendering:pixelated;outline:none}
+    .help{text-align:center;background:#090000;padding:.4rem;font-size:.88rem}
+  </style>
+</head>
+<body>
+  <main><canvas id="game" width="600" height="448" tabindex="0" aria-label="Super Off Road game"></canvas></main>
+  <div class="help">Xbox: stick/D-pad steer · A gas/select · B nitro/delete · Menu pause/name done. Keyboard: arrows/X/Z/Enter.</div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
