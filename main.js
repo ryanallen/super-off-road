@@ -60,6 +60,7 @@ const truckImages=["pink","yellow","purple","grey"].map(name=>{
 const pickupImages=Array.from({length:9},(_,i)=>{
   const image=new Image();image.src=`${assetRoot}/pickup-${i+1}.png`;return image;
 });
+const timerDigits=new Image();timerDigits.src=`${assetRoot}/timer-digits.png`;
 const recordings=new Map();
 let playing=null;
 function music(name,loop=false,onEnd=null){
@@ -125,7 +126,7 @@ const trackPixels = trackImages.map((image, i) => {
 });
 
 let state = "title", players = 1, race = 1, track = 0, reverse = false, paused = false;
-let menuIndex = 0, shopPlayer = 0, shopIndex = 0, elapsed = 0, finishDelay = 0, introTime = 0, endTime = 0;
+let menuIndex = 0, shopPlayer = 0, shopIndex = 0, elapsed = 0, finishDelay = 0, firstFinishAt = null, introTime = 0, endTime = 0;
 let trucks = [], pickups = [], pickupCount = 0, pickupTimer = 0, placement = [];
 const held = new Set(), just = new Set();
 const padNitroHeld=[false,false,false,false];
@@ -170,11 +171,12 @@ function trackForRace(n) {
 }
 function point(i) {
   const route = routes[track];
-  return reverse ? route[(route.length - i) % route.length] : route[i % route.length];
+  const index=((i%route.length)+route.length)%route.length;
+  return reverse ? route[(route.length-index)%route.length] : route[index];
 }
 function startRace() {
   const info=trackForRace(race);track=info.track;reverse=info.reverse;
-  const s=starts[track];elapsed=0;pickups=[];pickupCount=0;pickupTimer=1.6;placement=[];paused=false;finishDelay=0;
+  const s=starts[track];elapsed=0;pickups=[];pickupCount=0;pickupTimer=1.6;placement=[];paused=false;finishDelay=0;firstFinishAt=null;
   trucks=Array.from({length:4},(_,i)=>({
     x:s[0]+(i%2)*18-9,y:s[1]+Math.floor(i/2)*17-9,
     vx:0,vy:0,angle:reverse ? 0 : Math.PI,lap:1,waypoint:1,finished:false,
@@ -271,7 +273,7 @@ function updateTruck(t,dt) {
   t.vx*=drag;t.vy*=drag;
   const v=Math.hypot(t.vx,t.vy);
   if(v>limit){t.vx*=limit/v;t.vy*=limit/v;}
-  const wasOnRoad=road(t.x,t.y);
+  const oldX=t.x,oldY=t.y,wasOnRoad=road(t.x,t.y);
   t.x+=t.vx*dt;t.y+=t.vy*dt;
   let hit=false;
   if(t.x<7||t.x>592){t.x=Math.max(7,Math.min(592,t.x));t.vx*=-.3;hit=true;}
@@ -284,7 +286,14 @@ function updateTruck(t,dt) {
     t.hop=7*(1-stat.shocks*.1);t.rampCooldown=.8;
   }
   const p=point(t.waypoint);
-  if(Math.hypot(t.x-p[0],t.y-p[1])<(ai?28:25)) {
+  const before=point(t.waypoint-1),after=point(t.waypoint+1);
+  const tangentX=after[0]-before[0],tangentY=after[1]-before[1];
+  const tangentLength=Math.hypot(tangentX,tangentY)||1;
+  const alongBefore=((oldX-p[0])*tangentX+(oldY-p[1])*tangentY)/tangentLength;
+  const alongNow=((t.x-p[0])*tangentX+(t.y-p[1])*tangentY)/tangentLength;
+  const across=Math.abs((t.x-p[0])*tangentY-(t.y-p[1])*tangentX)/tangentLength;
+  const crossedGate=alongBefore<0&&alongNow>=0&&across<60;
+  if(Math.hypot(t.x-p[0],t.y-p[1])<35||crossedGate) {
     t.waypoint=(t.waypoint+1)%routes[track].length;
     if(t.waypoint===1){
       t.lap++;
@@ -293,8 +302,8 @@ function updateTruck(t,dt) {
   }
   const found=pickups.find(p=>Math.hypot(t.x-p.x,t.y-p.y)<14);
   if(found){
-    if(found.kind==="nitro")stat.nitro=Math.min(99,stat.nitro+found.value);
-    else {
+    if(!ai&&found.kind==="nitro")stat.nitro=Math.min(99,stat.nitro+found.value);
+    else if(!ai){
       const bonus=Math.min(40000,found.value*10000);
       stat.cash+=bonus;stat.points+=bonus/1000;
     }
@@ -336,10 +345,11 @@ function update(dt){
       }
     }
   }
+  if(placement.length&&firstFinishAt===null)firstFinishAt=elapsed;
   if(trucks.slice(0,players).every(t=>!racerStats[t.i].active||t.finished)){
     finishDelay+=dt;
     if(finishDelay>=2)finishRace();
-  }
+  }else if(firstFinishAt!==null&&elapsed-firstFinishAt>=60)finishRace();
 }
 function finishRace(){
   const remaining=trucks.filter(t=>!t.finished).sort((a,b)=>b.lap-a.lap||b.waypoint-a.waypoint);
@@ -515,15 +525,19 @@ function drawRace(){
     text(String(Math.min(4,t.lap)),x+17,54,16,"#140412","center");
     text(String(racerStats[i].nitro).padStart(2,"0"),x+17,70,13,"#140412","center");
   });
-  ctx.fillStyle="#050000";ctx.fillRect(447,35,104,35);
-  const clock=`${String(Math.floor(elapsed)%100).padStart(2,"0")}:${String(Math.floor(elapsed*100)%100).padStart(2,"0")}`;
-  ctx.font="bold 29px monospace";ctx.textAlign="center";ctx.lineWidth=2;ctx.strokeStyle="#ae5d16";
-  ctx.strokeText(clock,499,63);ctx.fillStyle="#fff6ed";ctx.fillText(clock,499,63);
+  const displayTime=Math.min(elapsed,99.99);
+  const clock=`${String(Math.floor(displayTime)).padStart(2,"0")}:${String(Math.floor(displayTime*100)%100).padStart(2,"0")}`;
+  if(timerDigits.complete&&timerDigits.naturalWidth){
+    [0,1,3,4].forEach((slot,i)=>{
+      const digit=Number(clock[slot]),x=[448,467,504,523][i];
+      ctx.drawImage(timerDigits,digit*18,0,18,31,x,36,18,31);
+    });
+  }
   for(const pickup of pickups){
     const sprite=pickupImages[pickup.number-1];
     if(sprite.complete&&sprite.naturalWidth)ctx.drawImage(sprite,pickup.x-8,pickup.y+81);
   }
-  trucks.forEach(drawTruck);
+  trucks.forEach(t=>{if(!t.finished||t.i<players)drawTruck(t);});
   if(paused){box(170,177,260,70);text("PAUSED",300,222,32,"#f4ea73","center");}
 }
 function drawTitle(){
