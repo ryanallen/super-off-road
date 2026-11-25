@@ -128,7 +128,7 @@ function spawnPickup() {
   if(pickups.length>3)pickups.shift();
 }
 function road(x,y) {
-  if(x<7||x>592||y<3||y>357)return false;
+  if(x<7||x>592||y<3||y>337)return false;
   const data=trackPixels[track];
   if(!data)return true;
   let barriers=0;
